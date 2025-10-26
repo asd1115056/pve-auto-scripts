@@ -3,4 +3,18 @@ name = "pve-auto-scripts"
 version = "0.1.0"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "paramiko>=4.0.0",
+    "ping3>=5.1.5",
+    "requests>=2.32.5",
+    "wakeonlan>=3.1.0",
+]
+
+[project.scripts]
+pve-backup-sync-to-nas = "pve_backup_sync_to_nas.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pve_backup_sync_to_nas"]
+
+[tool.uv]
+package = true

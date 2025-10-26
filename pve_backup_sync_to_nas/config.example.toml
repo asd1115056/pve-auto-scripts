@@ -1,0 +1,46 @@
+# PVE Backup Sync to NAS Configuration
+
+[nas]
+# NAS MAC address for Wake-on-LAN
+mac_address = "00:11:32:XX:XX:XX"
+
+# NAS IP address
+ip = "192.168.1.100"
+
+# SSH settings
+ssh_port = 22
+ssh_user = "admin"
+ssh_key = "~/.ssh/id_rsa"
+
+# Wait settings
+max_wait_time = 300
+ping_interval = 5
+ssh_ready_wait = 30
+
+[backup]
+# Local backup directory (PVE backup path)
+local_dir = "/var/lib/vz/dump"
+
+# NAS target directory
+nas_dir = "/volume1/backup/pve"
+
+# Rsync options
+rsync_options = "-ahP --delete --inplace --info=progress2"
+
+[log]
+# Log file path
+log_file = "/var/log/pve_backup_sync_to_nas.log"
+
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level = "INFO"
+
+[notification]
+# Enable Discord notifications
+enabled = false
+
+# Discord webhook URL
+discord_webhook = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+
+# Notification triggers
+on_success = true
+on_failure = true
