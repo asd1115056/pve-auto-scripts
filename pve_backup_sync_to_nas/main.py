@@ -99,7 +99,6 @@ def send_discord_notification(
     webhook_url: str,
     success: bool,
     duration: float,
-    file_size: Optional[str] = None,
     error_msg: Optional[str] = None,
 ):
     """Send Discord webhook notification"""
@@ -113,9 +112,6 @@ def send_discord_notification(
         {"name": "Status", "value": "Success" if success else "Failed", "inline": True},
         {"name": "Duration", "value": f"{duration:.1f}s", "inline": True},
     ]
-
-    if file_size:
-        fields.append({"name": "Size", "value": file_size, "inline": True})
 
     if error_msg:
         fields.append(
@@ -140,24 +136,6 @@ def send_discord_notification(
         logging.info("Discord notification sent")
     except Exception as e:
         logging.warning(f"Failed to send Discord notification: {e}")
-
-
-def get_directory_size(path: str) -> str:
-    """Get human-readable directory size"""
-    try:
-        result = subprocess.run(
-            ["du", "-sh", path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            size = result.stdout.split()[0]
-            return size
-        return "Unknown"
-    except Exception:
-        return "Unknown"
 
 
 # ==================== Backup Logic ====================
@@ -431,7 +409,6 @@ def main():
     start_time = time.time()
     success = False
     error_msg = None
-    file_size = None
 
     try:
         logging.info("=" * 60)
@@ -457,9 +434,6 @@ def main():
         logging.info("\n[Step 3] Execute Rsync backup")
         if not backup.rsync_backup():
             raise Exception("Backup failed")
-
-        # Get backup size
-        file_size = get_directory_size(config.backup.local_dir)
 
         # Step 4: Shutdown NAS
         logging.info("\n[Step 4] Shutdown NAS")
@@ -501,7 +475,6 @@ def main():
                     webhook_url=config.notification.discord_webhook,
                     success=success,
                     duration=duration,
-                    file_size=file_size,
                     error_msg=error_msg,
                 )
 
