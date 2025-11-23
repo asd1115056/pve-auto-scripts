@@ -58,13 +58,16 @@ mkdir -p /custom-scripts
 cat > /custom-scripts/pve-backup-sync-to-nas-hook.sh << 'EOF'
 #!/bin/bash
 
+# Set full PATH to ensure all commands are available
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # Only run when entire backup job completes
 if [ "$1" = "job-end" ]; then
     echo "[$(date)] PVE backup job completed, starting NAS sync..." >> /var/log/pve-backup-sync-to-nas-hook.log
-    
+
     cd /root/pve-auto-scripts
     /root/.local/bin/uv run pve-backup-sync-to-nas pve_backup_sync_to_nas/config.toml >> /var/log/pve-backup-sync-to-nas-hook.log 2>&1
-    
+
     if [ $? -eq 0 ]; then
         echo "[$(date)] NAS sync completed successfully" >> /var/log/pve-backup-sync-to-nas-hook.log
     else
