@@ -12,10 +12,17 @@ ssh_port = 22
 ssh_user = "admin"
 ssh_key = "~/.ssh/id_rsa"
 
+# SSH known_hosts file for host key verification (recommended for security)
+# If not specified, any host key will be accepted (with a warning)
+# known_hosts_file = "~/.ssh/known_hosts"
+
 # Wait settings
 max_wait_time = 300
 ping_interval = 5
 ssh_ready_wait = 30
+
+# SSH connection retry attempts
+ssh_retry_max = 10
 
 [backup]
 # Local backup directory (PVE backup path)

@@ -2,11 +2,13 @@
 
 import logging
 import os
+import shlex
+import shutil
 import subprocess
 import time
 import tomllib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -28,10 +30,12 @@ class NASConfig:
     ssh_user: str = "admin"
     ssh_port: int = 22
     ssh_key: Optional[str] = None
+    known_hosts_file: Optional[str] = None
     # Wait settings
     max_wait_time: int = 300
     ping_interval: int = 5
     ssh_ready_wait: int = 30
+    ssh_retry_max: int = 10
 
 
 @dataclass
@@ -84,9 +88,22 @@ def load_config(config_path: str) -> Config:
     with open(config_file, "rb") as f:
         data = tomllib.load(f)
 
+    # Validate required fields
+    nas_data = data.get("nas", {})
+    if "mac_address" not in nas_data:
+        raise ValueError("Missing required config: nas.mac_address")
+    if "ip" not in nas_data:
+        raise ValueError("Missing required config: nas.ip")
+
+    backup_data = data.get("backup", {})
+    if "local_dir" not in backup_data:
+        raise ValueError("Missing required config: backup.local_dir")
+    if "nas_dir" not in backup_data:
+        raise ValueError("Missing required config: backup.nas_dir")
+
     return Config(
-        nas=NASConfig(**data.get("nas", {})),
-        backup=BackupConfig(**data.get("backup", {})),
+        nas=NASConfig(**nas_data),
+        backup=BackupConfig(**backup_data),
         log=LogConfig(**data.get("log", {})),
         notification=NotificationConfig(**data.get("notification", {})),
     )
@@ -124,7 +141,7 @@ def send_discord_notification(
                 "title": title,
                 "color": color,
                 "fields": fields,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "footer": {"text": "PVE Backup Sync to NAS"},
             }
         ]
@@ -144,18 +161,16 @@ def send_discord_notification(
 class NASBackup:
     """NAS Backup Manager Class"""
 
-    def __init__(self, nas: NASConfig, backup: BackupConfig, log: LogConfig):
+    def __init__(self, nas: NASConfig, backup: BackupConfig):
         """
         Initialize NAS Backup Manager
 
         Args:
             nas: NAS configuration
             backup: Backup configuration
-            log: Logging configuration
         """
         self.nas = nas
         self.backup = backup
-        self.log = log
 
         # Convenience attributes
         self.nas_ip = nas.ip
@@ -163,19 +178,10 @@ class NASBackup:
         self.ssh_user = nas.ssh_user
         self.ssh_port = nas.ssh_port
         self.ssh_key = Path(nas.ssh_key).expanduser() if nas.ssh_key else None
-        self.ssh_client = None
-
-        self._setup_logging()
-
-    def _setup_logging(self):
-        """Setup logging configuration"""
-        log_level = getattr(logging, self.log.log_level.upper(), logging.INFO)
-
-        logging.basicConfig(
-            level=log_level,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            handlers=[logging.FileHandler(self.log.log_file), logging.StreamHandler()],
+        self.known_hosts = (
+            Path(nas.known_hosts_file).expanduser() if nas.known_hosts_file else None
         )
+        self.ssh_client = None
 
     def send_wol(self):
         """Send WOL packet to wake NAS"""
@@ -197,9 +203,17 @@ class NASBackup:
 
     def check_ssh_ready(self, timeout=5):
         """Check if SSH service is ready"""
+        client = None
         try:
             client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            # Load known hosts if specified
+            if self.known_hosts and self.known_hosts.exists():
+                client.load_host_keys(str(self.known_hosts))
+                client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            else:
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
             client.connect(
                 self.nas_ip,
                 port=self.ssh_port,
@@ -209,10 +223,12 @@ class NASBackup:
                 look_for_keys=True,
                 allow_agent=True,
             )
-            client.close()
             return True
         except Exception:
             return False
+        finally:
+            if client:
+                client.close()
 
     def wait_for_online(self):
         """Wait for NAS to be online and ready"""
@@ -238,21 +254,31 @@ class NASBackup:
         time.sleep(ssh_wait)
 
         retry_count = 0
-        while retry_count < 10:
+        max_retries = self.nas.ssh_retry_max
+        while retry_count < max_retries:
             if self.check_ssh_ready():
                 logging.info("SSH service is ready")
                 return True
             retry_count += 1
             time.sleep(5)
 
-        logging.error("SSH service not ready after retries")
+        logging.error(f"SSH service not ready after {max_retries} retries")
         return False
 
     def connect_ssh(self):
         """Establish SSH connection"""
         try:
             self.ssh_client = paramiko.SSHClient()
-            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            # Load known hosts if specified
+            if self.known_hosts and self.known_hosts.exists():
+                self.ssh_client.load_host_keys(str(self.known_hosts))
+                self.ssh_client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            else:
+                logging.warning(
+                    "No known_hosts file specified, accepting any host key (not recommended)"
+                )
+                self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
             connect_kwargs = {
                 "hostname": self.nas_ip,
@@ -305,53 +331,71 @@ class NASBackup:
                 logging.error(f"Source directory does not exist: {source_dir}")
                 return False
 
+            # Find rsync and ssh binaries
+            rsync_bin = shutil.which("rsync")
+            ssh_bin = shutil.which("ssh")
+            if not rsync_bin:
+                logging.error("rsync command not found in PATH")
+                return False
+            if not ssh_bin:
+                logging.error("ssh command not found in PATH")
+                return False
+
             target = f"{self.ssh_user}@{self.nas_ip}:{target_dir}"
 
-            # Build rsync command with proper SSH path
-            if self.ssh_key and self.ssh_key.exists():
-                # Use RSYNC_RSH environment variable instead
-                env = os.environ.copy()
-                env['RSYNC_RSH'] = f"/usr/bin/ssh -i {self.ssh_key} -p {self.ssh_port}"
-                
-                cmd = ["/usr/bin/rsync"]
-                cmd.extend(rsync_opts.split())
-                cmd.extend([f"{source_dir}/", f"{target}/"])
-            else:
-                cmd = ["/usr/bin/rsync"]
-                cmd.extend(rsync_opts.split())
-                cmd.extend([f"{source_dir}/", f"{target}/"])
-                env = None
+            # Build rsync command
+            cmd = [rsync_bin]
+            cmd.extend(shlex.split(rsync_opts))
+            cmd.extend([f"{source_dir}/", f"{target}/"])
 
-            logging.info(f"Starting Rsync backup...")
-            logging.info(f"Command: {' '.join(cmd)}")
+            # Set up environment with SSH options
+            env = os.environ.copy()
+            ssh_cmd_parts = [ssh_bin, "-p", str(self.ssh_port)]
+            if self.ssh_key and self.ssh_key.exists():
+                ssh_cmd_parts.extend(["-i", str(self.ssh_key)])
+            env["RSYNC_RSH"] = " ".join(shlex.quote(str(part)) for part in ssh_cmd_parts)
+
+            logging.info("Starting Rsync backup...")
+            logging.info(f"Command: {' '.join(shlex.quote(str(c)) for c in cmd)}")
+            logging.info(f"RSYNC_RSH: {env['RSYNC_RSH']}")
 
             # Use Popen for real-time output
             process = subprocess.Popen(
                 cmd,
                 env=env,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
-                universal_newlines=True,
             )
 
-            # Print output in real-time
+            # Capture output
+            output_lines = []
+            error_lines = []
+
+            # Read stdout in real-time
             for line in process.stdout:
                 print(line, end="")
+                output_lines.append(line)
 
-            # Wait for process to complete
-            process.wait()
+            # Wait for process to complete and get stderr
+            _, stderr = process.communicate()
+            if stderr:
+                error_lines = stderr.splitlines()
 
             if process.returncode == 0:
                 logging.info("Rsync backup completed successfully")
                 return True
             else:
+                error_msg = "\n".join(error_lines) if error_lines else "No error details"
                 logging.error(f"Rsync failed (return code: {process.returncode})")
+                logging.error(f"Error details: {error_msg}")
                 return False
 
         except Exception as e:
             logging.error(f"Rsync execution exception: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
             return False
 
     def shutdown_nas(self):
@@ -359,19 +403,23 @@ class NASBackup:
         try:
             logging.info("Shutting down NAS...")
 
-            if self.ssh_client:
-                try:
-                    self.ssh_client.exec_command("sudo shutdown -h now", timeout=5)
-                    logging.info("Shutdown command sent")
-                    return True
-                except Exception:
-                    logging.info(
-                        "Shutdown command sent (connection interruption is normal)"
-                    )
-                    return True
-            else:
+            if not self.ssh_client:
                 logging.error("SSH client not connected, cannot shutdown")
                 return False
+
+            try:
+                # Send shutdown command
+                self.ssh_client.exec_command("sudo shutdown -h now", timeout=5)
+                logging.info("Shutdown command sent")
+                return True
+            except Exception as e:
+                # Connection interruption is expected after shutdown
+                if "Socket is closed" in str(e) or "not open" in str(e):
+                    logging.info("Shutdown command sent (connection closed as expected)")
+                    return True
+                else:
+                    logging.warning(f"Shutdown command result unclear: {e}")
+                    return True
 
         except Exception as e:
             logging.error(f"Failed to shutdown NAS: {e}")
@@ -392,7 +440,7 @@ def main():
     # Load configuration
     try:
         config = load_config(sys.argv[1])
-    except FileNotFoundError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         sys.exit(1)
     except Exception as e:
@@ -402,8 +450,19 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    # Setup logging
+    log_level = getattr(logging, config.log.log_level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(config.log.log_file),
+            logging.StreamHandler(),
+        ],
+    )
+
     # Initialize backup manager
-    backup = NASBackup(config.nas, config.backup, config.log)
+    backup = NASBackup(config.nas, config.backup)
 
     # Track execution
     start_time = time.time()
