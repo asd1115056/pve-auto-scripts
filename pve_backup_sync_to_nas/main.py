@@ -117,6 +117,8 @@ def send_discord_notification(
     success: bool,
     duration: float,
     error_msg: Optional[str] = None,
+    prep_time: Optional[float] = None,
+    backup_time: Optional[float] = None,
 ):
     """Send Discord webhook notification"""
     if not webhook_url:
@@ -127,8 +129,16 @@ def send_discord_notification(
 
     fields = [
         {"name": "Status", "value": "Success" if success else "Failed", "inline": True},
-        {"name": "Duration", "value": f"{duration:.1f}s", "inline": True},
+        {"name": "Total", "value": f"{duration:.1f}s", "inline": True},
     ]
+
+    # Add time breakdown if available
+    if prep_time is not None and backup_time is not None:
+        fields.append({
+            "name": "Time Breakdown",
+            "value": f"Preparation: {prep_time:.1f}s | Backup: {backup_time:.1f}s",
+            "inline": False
+        })
 
     if error_msg:
         fields.append(
@@ -468,12 +478,17 @@ def main():
     start_time = time.time()
     success = False
     error_msg = None
+    prep_time = None
+    backup_time = None
 
     try:
         logging.info("=" * 60)
         logging.info("PVE Backup Sync to NAS Started")
         logging.info(f"Execution time: {datetime.now()}")
         logging.info("=" * 60)
+
+        # Preparation phase: Wake NAS, wait online, connect SSH
+        prep_start = time.time()
 
         # Step 1: Wake NAS
         logging.info("\n[Step 1] Wake NAS")
@@ -489,10 +504,17 @@ def main():
         if not backup.connect_ssh():
             raise Exception("Failed to establish SSH connection")
 
+        prep_time = time.time() - prep_start
+
+        # Backup phase: Execute Rsync
+        backup_start = time.time()
+
         # Step 3: Execute Rsync backup
         logging.info("\n[Step 3] Execute Rsync backup")
         if not backup.rsync_backup():
             raise Exception("Backup failed")
+
+        backup_time = time.time() - backup_start
 
         # Step 4: Shutdown NAS
         logging.info("\n[Step 4] Shutdown NAS")
@@ -503,6 +525,7 @@ def main():
         success = True
         logging.info("\n" + "=" * 60)
         logging.info("Backup process completed successfully!")
+        logging.info(f"Preparation: {prep_time:.1f}s | Backup: {backup_time:.1f}s")
         logging.info("=" * 60)
 
     except KeyboardInterrupt:
@@ -535,6 +558,8 @@ def main():
                     success=success,
                     duration=duration,
                     error_msg=error_msg,
+                    prep_time=prep_time,
+                    backup_time=backup_time,
                 )
 
         # Exit with appropriate code
